@@ -14,7 +14,7 @@ db.pragma('foreign_keys = ON');
 db.exec(`
   CREATE TABLE IF NOT EXISTS companies (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
+    name TEXT NOT NULL UNIQUE,
     contact_person TEXT,
     phone TEXT,
     payment_period TEXT DEFAULT 'monthly', -- 'weekly' or 'monthly'
@@ -78,6 +78,14 @@ if (!hasPaymentPeriod) {
   } catch (e) {
     console.error("Migration failed:", e);
   }
+}
+
+// Migration: Add unique index to companies.name if it doesn't exist
+try {
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_companies_name ON companies(name)");
+  console.log("Migration: Ensured unique index on companies.name");
+} catch (e) {
+  console.error("Migration failed (unique index):", e);
 }
 
 db.exec(`
@@ -190,47 +198,99 @@ async function startServer() {
   });
 
   app.post("/api/companies", (req, res) => {
-    const { name, contact_person, phone, payment_period, next_payment_date } = req.body;
-    
-    // Check for duplicates
-    const existing = db.prepare("SELECT id FROM companies WHERE name = ?").get(name);
-    if (existing) {
-      return res.status(400).json({ error: "Company with this name already exists" });
-    }
+    try {
+      const { name, contact_person, phone, payment_period, next_payment_date } = req.body;
+      
+      if (!name || name.trim() === "") {
+        return res.status(400).json({ error: "Company name is required" });
+      }
 
-    const info = db.prepare("INSERT INTO companies (name, contact_person, phone, payment_period, next_payment_date) VALUES (?, ?, ?, ?, ?)").run(name, contact_person, phone, payment_period || 'monthly', next_payment_date);
-    res.json({ id: info.lastInsertRowid });
+      const trimmedName = name.trim();
+      
+      // Check for duplicates
+      const existing = db.prepare("SELECT id FROM companies WHERE name = ?").get(trimmedName);
+      if (existing) {
+        return res.status(400).json({ error: "Company with this name already exists" });
+      }
+
+      const info = db.prepare("INSERT INTO companies (name, contact_person, phone, payment_period, next_payment_date) VALUES (?, ?, ?, ?, ?)").run(trimmedName, contact_person, phone, payment_period || 'monthly', next_payment_date);
+      res.json({ id: info.lastInsertRowid });
+    } catch (error: any) {
+      console.error("Error creating company:", error);
+      res.status(500).json({ error: error.message || "Internal server error" });
+    }
   });
 
   app.put("/api/companies/:id", (req, res) => {
-    const { id } = req.params;
-    const { name, contact_person, phone, payment_period, last_payment_date, next_payment_date } = req.body;
-    db.prepare("UPDATE companies SET name = ?, contact_person = ?, phone = ?, payment_period = ?, last_payment_date = ?, next_payment_date = ? WHERE id = ?")
-      .run(name, contact_person, phone, payment_period, last_payment_date, next_payment_date, id);
-    res.json({ success: true });
+    try {
+      const { id } = req.params;
+      const { name, contact_person, phone, payment_period, last_payment_date, next_payment_date } = req.body;
+      
+      if (!name || name.trim() === "") {
+        return res.status(400).json({ error: "Company name is required" });
+      }
+
+      const trimmedName = name.trim();
+
+      // Check for duplicates excluding current ID
+      const existing = db.prepare("SELECT id FROM companies WHERE name = ? AND id != ?").get(trimmedName, id);
+      if (existing) {
+        return res.status(400).json({ error: "Another company with this name already exists" });
+      }
+
+      db.prepare("UPDATE companies SET name = ?, contact_person = ?, phone = ?, payment_period = ?, last_payment_date = ?, next_payment_date = ? WHERE id = ?")
+        .run(trimmedName, contact_person, phone, payment_period, last_payment_date, next_payment_date, id);
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Error updating company:", error);
+      res.status(500).json({ error: error.message || "Internal server error" });
+    }
   });
 
   app.delete("/api/companies/:id", (req, res) => {
-    const { id } = req.params;
-    console.log(`Attempting to delete company ID: ${id}`);
+    const { id: rawId } = req.params;
+    const id = parseInt(rawId);
+    console.log(`[DELETE] Attempting to delete company ID: ${id} (raw: ${rawId})`);
+    
     try {
+      if (isNaN(id)) {
+        return res.status(400).json({ error: "Invalid company ID" });
+      }
+
+      // First, check if company exists
+      const company = db.prepare("SELECT * FROM companies WHERE id = ?").get(id);
+      if (!company) {
+        console.warn(`[DELETE] Company ID ${id} not found`);
+        return res.status(404).json({ error: "Company not found" });
+      }
+
+      // Perform deletion in a transaction
       const transaction = db.transaction(() => {
-        // Unlink patients instead of blocking
-        const result = db.prepare("UPDATE patients SET company_id = NULL WHERE company_id = ?").run(id);
-        console.log(`Unlinked ${result.changes} patients from company ${id}`);
+        // 1. Unlink patients
+        const unlinkResult = db.prepare("UPDATE patients SET company_id = NULL WHERE company_id = ?").run(id);
+        console.log(`[DELETE] Unlinked ${unlinkResult.changes} patients from company ${id}`);
         
+        // 2. Delete the company
         const deleteResult = db.prepare("DELETE FROM companies WHERE id = ?").run(id);
-        console.log(`Deleted ${deleteResult.changes} company record for ID ${id}`);
+        console.log(`[DELETE] Deleted ${deleteResult.changes} company record for ID ${id}`);
         
         if (deleteResult.changes === 0) {
-          throw new Error("Company not found or already deleted");
+          throw new Error("Failed to delete company record from database");
         }
       });
+
       transaction();
+      console.log(`[DELETE] Successfully deleted company ID ${id}`);
       res.json({ success: true });
     } catch (error: any) {
-      console.error("Error deleting company:", error);
-      res.status(500).json({ error: error.message || "Internal server error" });
+      console.error(`[DELETE] Error deleting company ID ${id}:`, error);
+      
+      let errorMessage = error.message || "Internal server error";
+      if (errorMessage.includes("FOREIGN KEY constraint failed")) {
+        errorMessage = "Cannot delete company: it is still referenced by other records (Foreign Key Constraint).";
+      }
+      
+      res.status(500).json({ error: errorMessage });
     }
   });
 

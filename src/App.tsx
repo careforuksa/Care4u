@@ -139,6 +139,7 @@ export default function App() {
   const [selectedCompanyForReport, setSelectedCompanyForReport] = useState<Company | null>(null);
   const [selectedPatientForFile, setSelectedPatientForFile] = useState<Patient | null>(null);
   const [patientSearch, setPatientSearch] = useState('');
+  const [deletingCompanyId, setDeletingCompanyId] = useState<number | null>(null);
   
   // Visits Filters
   const [visitSearch, setVisitSearch] = useState('');
@@ -894,6 +895,26 @@ export default function App() {
 
           {activeTab === 'companies' && (
             <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                  <h3 className="text-2xl font-bold text-slate-800">{t.companies}</h3>
+                  <button 
+                    onClick={() => { fetchData(); fetchCompanyStats(); }}
+                    className="p-2 text-slate-400 hover:text-emerald-600 transition-colors"
+                    title={lang === 'ar' ? 'تحديث' : 'Refresh'}
+                  >
+                    <History size={20} />
+                  </button>
+                </div>
+                <button 
+                  onClick={() => setShowAddCompany(true)}
+                  className="bg-emerald-600 text-white px-6 py-3 rounded-2xl font-bold flex items-center gap-2 hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-100"
+                >
+                  <Plus size={20} />
+                  {t.newCompany}
+                </button>
+              </div>
+
               {/* Date Filter for Companies */}
               <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm flex flex-col md:flex-row items-end gap-4">
                 <div className="flex-1">
@@ -960,19 +981,41 @@ export default function App() {
                             {t.edit}
                           </button>
                           <button 
+                            disabled={deletingCompanyId === company.id}
                             onClick={async () => {
                               if (confirm(t.confirmDeleteCompany)) {
-                                const res = await fetch(`/api/companies/${company.id}`, { method: 'DELETE' });
-                                if (res.ok) fetchData();
-                                else {
-                                  const err = await res.json();
-                                  alert(`${t.error}: ${err.error}`);
+                                try {
+                                  setDeletingCompanyId(company.id);
+                                  const res = await fetch(`/api/companies/${company.id}`, { method: 'DELETE' });
+                                  if (res.ok) {
+                                    await fetchData();
+                                    alert(lang === 'ar' ? 'تم حذف الشركة بنجاح' : 'Company deleted successfully');
+                                  } else {
+                                    const err = await res.json();
+                                    alert(`${t.error}: ${err.error || 'Failed to delete'}`);
+                                  }
+                                } catch (error) {
+                                  console.error("Delete error:", error);
+                                  alert(lang === 'ar' ? 'حدث خطأ أثناء الاتصال بالخادم' : 'Error connecting to server');
+                                } finally {
+                                  setDeletingCompanyId(null);
                                 }
                               }
                             }}
-                            className="px-4 bg-rose-50 text-rose-600 font-bold py-2 rounded-xl hover:bg-rose-100 transition-colors text-sm"
+                            className={`px-4 font-bold py-2 rounded-xl transition-colors text-sm flex items-center gap-2 ${
+                              deletingCompanyId === company.id 
+                                ? 'bg-slate-100 text-slate-400 cursor-not-allowed' 
+                                : 'bg-rose-50 text-rose-600 hover:bg-rose-100'
+                            }`}
                           >
-                            {t.delete}
+                            {deletingCompanyId === company.id ? (
+                              <>
+                                <div className="w-3 h-3 border-2 border-slate-400 border-t-transparent rounded-full animate-spin"></div>
+                                {lang === 'ar' ? 'جاري الحذف...' : 'Deleting...'}
+                              </>
+                            ) : (
+                              t.delete
+                            )}
                           </button>
                         </div>
                         
@@ -2144,30 +2187,41 @@ function AddCompanyForm({ onSuccess, initialData, lang }: { onSuccess: () => voi
   const [phone, setPhone] = useState(initialData?.phone || '');
   const [period, setPeriod] = useState(initialData?.payment_period || 'monthly');
   const [nextDate, setNextDate] = useState(initialData?.next_payment_date || '');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const url = initialData ? `/api/companies/${initialData.id}` : '/api/companies';
-    const method = initialData ? 'PUT' : 'POST';
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    
+    try {
+      const url = initialData ? `/api/companies/${initialData.id}` : '/api/companies';
+      const method = initialData ? 'PUT' : 'POST';
 
-    const res = await fetch(url, {
-      method,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        name, 
-        contact_person: contact, 
-        phone, 
-        payment_period: period,
-        last_payment_date: initialData?.last_payment_date,
-        next_payment_date: nextDate || null
-      })
-    });
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          name, 
+          contact_person: contact, 
+          phone, 
+          payment_period: period,
+          last_payment_date: initialData?.last_payment_date,
+          next_payment_date: nextDate || null
+        })
+      });
 
-    if (res.ok) {
-      onSuccess();
-    } else {
-      const err = await res.json();
-      alert(lang === 'ar' ? `خطأ: ${err.error === 'Company with this name already exists' ? 'هذه الشركة موجودة مسبقاً' : err.error}` : `Error: ${err.error}`);
+      if (res.ok) {
+        onSuccess();
+      } else {
+        const err = await res.json();
+        alert(lang === 'ar' ? `خطأ: ${err.error === 'Company with this name already exists' ? 'هذه الشركة موجودة مسبقاً' : err.error}` : `Error: ${err.error}`);
+      }
+    } catch (error) {
+      console.error("Error saving company:", error);
+      alert(lang === 'ar' ? 'حدث خطأ أثناء الحفظ' : 'An error occurred while saving');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -2226,8 +2280,12 @@ function AddCompanyForm({ onSuccess, initialData, lang }: { onSuccess: () => voi
           />
         </div>
       </div>
-      <button type="submit" className="w-full bg-emerald-600 text-white font-bold py-3 rounded-xl hover:bg-emerald-700 transition-colors shadow-lg shadow-emerald-100">
-        {initialData ? t.update : t.save}
+      <button 
+        type="submit" 
+        disabled={isSubmitting}
+        className={`w-full bg-emerald-600 text-white font-bold py-3 rounded-xl transition-colors shadow-lg shadow-emerald-100 ${isSubmitting ? 'opacity-50 cursor-not-allowed' : 'hover:bg-emerald-700'}`}
+      >
+        {isSubmitting ? (lang === 'ar' ? 'جاري الحفظ...' : 'Saving...') : (initialData ? t.update : t.save)}
       </button>
     </form>
   );
