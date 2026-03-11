@@ -25,7 +25,8 @@ import {
   BarChart3,
   Download,
   Printer,
-  TrendingUp
+  TrendingUp,
+  History
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
@@ -99,6 +100,13 @@ type Stats = {
   paid_amount: number;
 };
 
+const formatDate = (dateStr: string | null | undefined, lang: 'ar' | 'en') => {
+  if (!dateStr) return '-';
+  const date = new Date(dateStr);
+  if (isNaN(date.getTime())) return dateStr;
+  return date.toLocaleDateString(lang === 'ar' ? 'ar-SA' : 'en-US');
+};
+
 export default function App() {
   const [lang, setLang] = useState<'ar' | 'en'>('ar');
   const t = translations[lang];
@@ -130,6 +138,7 @@ export default function App() {
   const [selectedPackage, setSelectedPackage] = useState<Package | null>(null);
   const [selectedCompanyForReport, setSelectedCompanyForReport] = useState<Company | null>(null);
   const [selectedPatientForFile, setSelectedPatientForFile] = useState<Patient | null>(null);
+  const [patientSearch, setPatientSearch] = useState('');
   
   // Visits Filters
   const [visitSearch, setVisitSearch] = useState('');
@@ -197,6 +206,10 @@ export default function App() {
       setVisits(await visitsRes.json());
       setServices(await servicesRes.json());
       setPackages(await packagesRes.json());
+      
+      if (activeTab === 'companies') {
+        fetchCompanyStats();
+      }
     } catch (error) {
       console.error("Error fetching data:", error);
     }
@@ -486,7 +499,7 @@ export default function App() {
                           <td className="px-6 py-4 font-medium">{visit.patient_name}</td>
                           <td className="px-6 py-4 text-emerald-600 font-medium">{visit.service_name}</td>
                           <td className="px-6 py-4 text-slate-600">{visit.company_name || t.direct}</td>
-                          <td className="px-6 py-4 text-slate-500 text-sm">{new Date(visit.visit_date).toLocaleDateString(lang === 'ar' ? 'ar-SA' : 'en-US')}</td>
+                          <td className="px-6 py-4 text-slate-500 text-sm">{formatDate(visit.visit_date, lang)}</td>
                           <td className="px-6 py-4 font-mono font-semibold">{visit.amount} {t.sar}</td>
                           <td className="px-6 py-4">
                             <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold ${
@@ -506,9 +519,25 @@ export default function App() {
           )}
 
           {activeTab === 'patients' && (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {patients.map((patient) => (
-                <motion.div 
+            <div className="space-y-6">
+              <div className="flex flex-col md:flex-row justify-between items-center gap-4">
+                <div className="relative w-full md:w-96">
+                  <Search className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                  <input 
+                    type="text" 
+                    placeholder={lang === 'ar' ? "بحث باسم المريض أو الشركة..." : "Search by patient or company..."}
+                    value={patientSearch}
+                    onChange={(e) => setPatientSearch(e.target.value)}
+                    className="w-full pr-10 pl-4 py-2 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {patients.filter(p => {
+                  const search = patientSearch.toLowerCase();
+                  return p.name.toLowerCase().includes(search) || (p.company_name || '').toLowerCase().includes(search);
+                }).map((patient) => (
+                  <motion.div 
                   initial={{ opacity: 0, y: 20 }}
                   animate={{ opacity: 1, y: 0 }}
                   key={patient.id} 
@@ -561,7 +590,7 @@ export default function App() {
           </div>
 
           <div className="pt-4 border-t border-slate-50 flex justify-between items-center text-xs text-slate-400">
-            <span>{t.joinedIn}: {new Date(patient.created_at).toLocaleDateString(lang === 'ar' ? 'ar-SA' : 'en-US')}</span>
+            <span>{t.joinedIn}: {formatDate(patient.created_at, lang)}</span>
             <button 
               onClick={() => setEditingPatient(patient)}
               className="text-emerald-600 font-bold hover:underline"
@@ -587,7 +616,8 @@ export default function App() {
                 </motion.div>
               ))}
             </div>
-          )}
+          </div>
+        )}
 
           {activeTab === 'visits' && (
             <div className="space-y-4">
@@ -626,9 +656,8 @@ export default function App() {
                                               (visitStatusFilter === 'unpaid' && !v.is_paid);
                           const matchesService = visitServiceFilter === 'all' || v.service_id?.toString() === visitServiceFilter;
                           
-                          const vDate = new Date(v.visit_date);
-                          const matchesStart = !visitStartDate || vDate >= new Date(visitStartDate);
-                          const matchesEnd = !visitEndDate || vDate <= new Date(visitEndDate);
+                          const matchesStart = !visitStartDate || v.visit_date >= visitStartDate;
+                          const matchesEnd = !visitEndDate || v.visit_date <= visitEndDate;
                           
                           return matchesSearch && matchesCompany && matchesStatus && matchesService && matchesStart && matchesEnd;
                         });
@@ -637,7 +666,7 @@ export default function App() {
                           'المريض': v.patient_name,
                           'الخدمة': v.service_name,
                           'الشركة': v.company_name || 'مباشر',
-                          'التاريخ': new Date(v.visit_date).toLocaleDateString('ar-SA'),
+                          'التاريخ': formatDate(v.visit_date, 'ar'),
                           'المبلغ': v.amount,
                           'الحالة': v.is_paid ? 'تم الدفع' : 'معلق'
                         }));
@@ -767,9 +796,8 @@ export default function App() {
                                             (visitStatusFilter === 'paid' && v.is_paid) || 
                                             (visitStatusFilter === 'unpaid' && !v.is_paid);
                         
-                        const vDate = new Date(v.visit_date);
-                        const matchesStart = !visitStartDate || vDate >= new Date(visitStartDate);
-                        const matchesEnd = !visitEndDate || vDate <= new Date(visitEndDate);
+                        const matchesStart = !visitStartDate || v.visit_date >= visitStartDate;
+                        const matchesEnd = !visitEndDate || v.visit_date <= visitEndDate;
                         const matchesService = visitServiceFilter === 'all' || v.service_id?.toString() === visitServiceFilter;
                         
                         return matchesSearch && matchesCompany && matchesStatus && matchesService && matchesStart && matchesEnd;
@@ -801,7 +829,7 @@ export default function App() {
                                 <span className="text-slate-400">-</span>
                               )}
                             </td>
-                            <td className="px-6 py-4 text-slate-500 text-sm">{new Date(visit.visit_date).toLocaleDateString(lang === 'ar' ? 'ar-SA' : 'en-US')}</td>
+                            <td className="px-6 py-4 text-slate-500 text-sm">{formatDate(visit.visit_date, lang)}</td>
                             <td className="px-6 py-4 font-mono font-semibold">{visit.amount} {t.sar}</td>
                             <td className="px-6 py-4 font-mono font-semibold text-emerald-600">{visit.paid_amount || 0} {t.sar}</td>
                             <td className="px-6 py-4 font-mono font-semibold text-rose-600">{balance} {t.sar}</td>
@@ -1131,7 +1159,7 @@ export default function App() {
 
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                 {dueCompanies.map((company) => {
-                  const lastPaid = company.last_payment_date ? new Date(company.last_payment_date).toLocaleDateString(lang === 'ar' ? 'ar-SA' : 'en-US') : t.neverPaid;
+                  const lastPaid = formatDate(company.last_payment_date, lang);
                   return (
                     <motion.div 
                       initial={{ opacity: 0, y: 20 }}
@@ -1160,7 +1188,7 @@ export default function App() {
                       {company.next_payment_date && (
                         <p className="text-sm text-amber-600 font-bold mb-1 flex items-center gap-1">
                           <AlertCircle size={14} />
-                          {t.dueDate}: {new Date(company.next_payment_date).toLocaleDateString(lang === 'ar' ? 'ar-SA' : 'en-US')}
+                          {t.dueDate}: {formatDate(company.next_payment_date, lang)}
                         </p>
                       )}
                       <p className="text-sm text-emerald-600 font-bold mb-4 flex items-center gap-1">
@@ -1407,7 +1435,7 @@ function CompanyReport({ company, onMarkPaid, lang }: { company: Company, onMark
               {unpaidVisits.map(visit => (
                 <tr key={visit.id} className="hover:bg-slate-50/50">
                   <td className="px-4 py-3 font-medium">{visit.patient_name}</td>
-                  <td className="px-4 py-3 text-slate-500">{new Date(visit.visit_date).toLocaleDateString(lang === 'ar' ? 'ar-SA' : 'en-US')}</td>
+                  <td className="px-4 py-3 text-slate-500">{formatDate(visit.visit_date, lang)}</td>
                   <td className="px-4 py-3 font-bold text-slate-700">{visit.amount} {t.sar}</td>
                   <td className="px-4 py-3 font-bold text-rose-600">{(visit.amount - (visit.paid_amount || 0))} {t.sar}</td>
                 </tr>
@@ -1532,7 +1560,7 @@ function PatientFile({ patient, services, onAddVisit, lang }: { patient: Patient
                       <span className="text-slate-400">-</span>
                     )}
                   </td>
-                  <td className="px-4 py-3 text-slate-500">{new Date(visit.visit_date).toLocaleDateString(lang === 'ar' ? 'ar-SA' : 'en-US')}</td>
+                  <td className="px-4 py-3 text-slate-500">{formatDate(visit.visit_date, lang)}</td>
                   <td className="px-4 py-3 font-bold text-slate-700">{visit.amount} {t.sar}</td>
                   <td className="px-4 py-3">
                     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
@@ -1545,7 +1573,7 @@ function PatientFile({ patient, services, onAddVisit, lang }: { patient: Patient
               ))}
               {visits.length === 0 && (
                 <tr>
-                  <td colSpan={4} className="px-4 py-8 text-center text-slate-400 italic">{t.noData}</td>
+                  <td colSpan={5} className="px-4 py-8 text-center text-slate-400 italic">{t.noData}</td>
                 </tr>
               )}
             </tbody>
@@ -1610,7 +1638,7 @@ function ReportsPage({ startDate, endDate, setStartDate, setEndDate, companies, 
       [t.patient]: v.patient_name,
       [t.service]: v.service_name,
       [t.company]: v.company_name || t.direct,
-      [t.date]: new Date(v.visit_date).toLocaleDateString(lang === 'ar' ? 'ar-SA' : 'en-US'),
+      [t.date]: formatDate(v.visit_date, lang),
       [t.amount]: v.amount,
       [t.status]: v.is_paid ? t.paid : t.pending
     }));
@@ -1739,7 +1767,7 @@ function ReportsPage({ startDate, endDate, setStartDate, setEndDate, companies, 
                         <span className="text-slate-400">-</span>
                       )}
                     </td>
-                    <td className="px-6 py-4 text-slate-500">{new Date(v.visit_date).toLocaleDateString(lang === 'ar' ? 'ar-SA' : 'en-US')}</td>
+                    <td className="px-6 py-4 text-slate-500">{formatDate(v.visit_date, lang)}</td>
                     <td className="px-6 py-4 font-bold text-slate-700">{v.amount?.toLocaleString() || 0} {t.sar}</td>
                     <td className="px-6 py-4">
                       <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold ${
@@ -1932,6 +1960,7 @@ function AddVisitForm({ patients, services, onSuccess, initialData, lang }: { pa
   const [totalSessions, setTotalSessions] = useState(initialData?.total_sessions?.toString() || '1');
   const [notes, setNotes] = useState(initialData?.notes || '');
   const [isPaid, setIsPaid] = useState(initialData?.is_paid === 1);
+  const [isPackage, setIsPackage] = useState(parseInt(totalSessions) > 1);
 
   const selectedPatient = patients.find(p => p.id.toString() === patientId);
   const isCompanyPatient = !!selectedPatient?.company_id;
@@ -1955,7 +1984,8 @@ function AddVisitForm({ patients, services, onSuccess, initialData, lang }: { pa
         paid_amount: finalPaidAmount,
         total_sessions: parseInt(totalSessions) || 1,
         notes,
-        is_paid: finalIsPaid
+        is_paid: finalIsPaid,
+        is_postponed: initialData?.is_postponed || 0
       })
     });
     onSuccess();
@@ -2003,26 +2033,54 @@ function AddVisitForm({ patients, services, onSuccess, initialData, lang }: { pa
           className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 outline-none"
         />
       </div>
-      {!initialData && (
-        <div>
-          <label className="block text-sm font-bold text-slate-700 mb-1">{t.totalSessions}</label>
-          <input 
-            type="number"
-            min="1"
-            required
-            value={totalSessions}
-            onChange={(e) => setTotalSessions(e.target.value)}
-            placeholder="1"
-            className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 outline-none"
-          />
-          {parseInt(totalSessions) > 1 && (
+      <div className="space-y-3">
+        <div className="flex items-center justify-between p-3 bg-blue-50/50 border border-blue-100 rounded-xl">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center text-blue-600">
+              <Clock size={16} />
+            </div>
+            <div>
+              <div className="text-sm font-bold text-slate-700">{t.addToTreatmentPackage}</div>
+              <div className="text-[10px] text-slate-500">{lang === 'ar' ? 'تفعيل هذا الخيار لإنشاء برنامج جلسات' : 'Enable to create a session package'}</div>
+            </div>
+          </div>
+          <button 
+            type="button"
+            onClick={() => {
+              const newIsPackage = !isPackage;
+              setIsPackage(newIsPackage);
+              if (!newIsPackage) setTotalSessions('1');
+              else if (totalSessions === '1') setTotalSessions('10');
+            }}
+            className={`w-12 h-6 rounded-full transition-colors relative ${isPackage ? 'bg-emerald-500' : 'bg-slate-300'}`}
+          >
+            <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${isPackage ? 'left-7' : 'left-1'}`} />
+          </button>
+        </div>
+
+        {isPackage && (
+          <motion.div 
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            className="space-y-1"
+          >
+            <label className="block text-sm font-bold text-slate-700 mb-1">{t.totalSessions}</label>
+            <input 
+              type="number"
+              min="2"
+              required
+              value={totalSessions}
+              onChange={(e) => setTotalSessions(e.target.value)}
+              placeholder="10"
+              className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 outline-none"
+            />
             <p className="mt-1 text-[10px] text-blue-600 font-bold flex items-center gap-1">
               <Clock size={12} />
               {lang === 'ar' ? 'سيتم إنشاء برنامج علاجي تلقائياً لهذا المريض' : 'A treatment package will be created automatically for this patient'}
             </p>
-          )}
-        </div>
-      )}
+          </motion.div>
+        )}
+      </div>
       <div className={`grid ${isCompanyPatient ? 'grid-cols-1' : 'grid-cols-2'} gap-4`}>
         <div>
           <label className="block text-sm font-bold text-slate-700 mb-1">{t.amount} ({t.sar})</label>
@@ -2057,10 +2115,19 @@ function AddVisitForm({ patients, services, onSuccess, initialData, lang }: { pa
           placeholder={lang === 'ar' ? "أي ملاحظات إضافية عن الجلسة..." : "Any additional notes about the session..."}
         />
       </div>
-      {initialData && !isCompanyPatient && (
-        <div className="flex items-center gap-2">
-          <input type="checkbox" id="isPaid" checked={isPaid} onChange={(e) => setIsPaid(e.target.checked)} className="w-4 h-4 text-emerald-600" />
-          <label htmlFor="isPaid" className="text-sm font-bold text-slate-700">{t.paid}</label>
+      {!isCompanyPatient && (
+        <div className="flex items-center gap-2 p-3 bg-slate-50 rounded-xl border border-slate-100">
+          <input 
+            type="checkbox" 
+            id="isPaid" 
+            checked={isPaid} 
+            onChange={(e) => setIsPaid(e.target.checked)} 
+            className="w-5 h-5 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500" 
+          />
+          <label htmlFor="isPaid" className="text-sm font-bold text-slate-700 cursor-pointer select-none">
+            {t.paid}
+            <span className="block text-[10px] text-slate-400 font-normal">{lang === 'ar' ? 'تحديد هذا الخيار إذا تم استلام المبلغ بالكامل' : 'Check this if the full amount has been received'}</span>
+          </label>
         </div>
       )}
       <button type="submit" className="w-full bg-emerald-600 text-white font-bold py-3 rounded-xl hover:bg-emerald-700 transition-colors shadow-lg shadow-emerald-100">
@@ -2083,7 +2150,7 @@ function AddCompanyForm({ onSuccess, initialData, lang }: { onSuccess: () => voi
     const url = initialData ? `/api/companies/${initialData.id}` : '/api/companies';
     const method = initialData ? 'PUT' : 'POST';
 
-    await fetch(url, {
+    const res = await fetch(url, {
       method,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ 
@@ -2095,7 +2162,13 @@ function AddCompanyForm({ onSuccess, initialData, lang }: { onSuccess: () => voi
         next_payment_date: nextDate || null
       })
     });
-    onSuccess();
+
+    if (res.ok) {
+      onSuccess();
+    } else {
+      const err = await res.json();
+      alert(lang === 'ar' ? `خطأ: ${err.error === 'Company with this name already exists' ? 'هذه الشركة موجودة مسبقاً' : err.error}` : `Error: ${err.error}`);
+    }
   };
 
   return (
@@ -2318,7 +2391,7 @@ function PackageDetails({ pkg, onUpdate, lang }: { pkg: Package, onUpdate: () =>
                   {logs.length - index}
                 </div>
                 <div>
-                  <div className="text-sm font-bold text-slate-700">{new Date(log.session_date).toLocaleDateString(lang === 'ar' ? 'ar-SA' : 'en-US')}</div>
+                  <div className="text-sm font-bold text-slate-700">{formatDate(log.session_date, lang)}</div>
                   {log.notes && <p className="text-xs text-slate-500 mt-1">{log.notes}</p>}
                 </div>
               </div>

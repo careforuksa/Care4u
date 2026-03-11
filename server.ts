@@ -8,6 +8,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const db = new Database("caretrack.db");
+db.pragma('foreign_keys = ON');
 
 // Initialize Database (Basic tables first)
 db.exec(`
@@ -98,6 +99,13 @@ db.exec(`
 
   -- Seed default services
   INSERT OR IGNORE INTO services (name) VALUES ('زيارة طبيب'), ('زيارة ممرضة'), ('زيارة علاج طبيعي');
+
+  -- Seed companies
+  INSERT OR IGNORE INTO companies (name, payment_period) VALUES ('ذات قروب | Thaat Group', 'weekly');
+  INSERT OR IGNORE INTO companies (name, payment_period) VALUES ('إشفاء | Ishfaa', 'monthly');
+  INSERT OR IGNORE INTO companies (name, payment_period) VALUES ('نرعاكم | Naraakum', 'monthly');
+  INSERT OR IGNORE INTO companies (name, payment_period) VALUES ('حكيم كير | Hakeem Care', 'monthly');
+  INSERT OR IGNORE INTO companies (name, payment_period) VALUES ('وتد | Watad', 'monthly');
 `);
 
 // Migration: Add paid_amount to visits if it doesn't exist
@@ -146,6 +154,24 @@ if (!hasVisitId) {
   }
 }
 
+// Migration: Add unique constraint to companies and cleanup duplicates
+try {
+  // 1. Cleanup duplicates first
+  db.exec(`
+    DELETE FROM companies 
+    WHERE id NOT IN (
+      SELECT MIN(id) 
+      FROM companies 
+      GROUP BY name
+    )
+  `);
+  
+  // 2. We can't easily add UNIQUE to existing column in SQLite without recreating table, 
+  // but we can check in the POST endpoint.
+} catch (e) {
+  console.error("Cleanup failed:", e);
+}
+
 async function startServer() {
   const app = express();
   app.use(express.json());
@@ -165,6 +191,13 @@ async function startServer() {
 
   app.post("/api/companies", (req, res) => {
     const { name, contact_person, phone, payment_period, next_payment_date } = req.body;
+    
+    // Check for duplicates
+    const existing = db.prepare("SELECT id FROM companies WHERE name = ?").get(name);
+    if (existing) {
+      return res.status(400).json({ error: "Company with this name already exists" });
+    }
+
     const info = db.prepare("INSERT INTO companies (name, contact_person, phone, payment_period, next_payment_date) VALUES (?, ?, ?, ?, ?)").run(name, contact_person, phone, payment_period || 'monthly', next_payment_date);
     res.json({ id: info.lastInsertRowid });
   });
@@ -179,13 +212,26 @@ async function startServer() {
 
   app.delete("/api/companies/:id", (req, res) => {
     const { id } = req.params;
-    // Check if company has patients
-    const patients = db.prepare("SELECT COUNT(*) as count FROM patients WHERE company_id = ?").get() as any;
-    if (patients.count > 0) {
-      return res.status(400).json({ error: "Cannot delete company with existing patients" });
+    console.log(`Attempting to delete company ID: ${id}`);
+    try {
+      const transaction = db.transaction(() => {
+        // Unlink patients instead of blocking
+        const result = db.prepare("UPDATE patients SET company_id = NULL WHERE company_id = ?").run(id);
+        console.log(`Unlinked ${result.changes} patients from company ${id}`);
+        
+        const deleteResult = db.prepare("DELETE FROM companies WHERE id = ?").run(id);
+        console.log(`Deleted ${deleteResult.changes} company record for ID ${id}`);
+        
+        if (deleteResult.changes === 0) {
+          throw new Error("Company not found or already deleted");
+        }
+      });
+      transaction();
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Error deleting company:", error);
+      res.status(500).json({ error: error.message || "Internal server error" });
     }
-    db.prepare("DELETE FROM companies WHERE id = ?").run(id);
-    res.json({ success: true });
   });
 
   // Packages
@@ -215,9 +261,17 @@ async function startServer() {
 
   app.delete("/api/packages/:id", (req, res) => {
     const { id } = req.params;
-    db.prepare("DELETE FROM session_logs WHERE package_id = ?").run(id);
-    db.prepare("DELETE FROM packages WHERE id = ?").run(id);
-    res.json({ success: true });
+    try {
+      const transaction = db.transaction(() => {
+        db.prepare("DELETE FROM session_logs WHERE package_id = ?").run(id);
+        db.prepare("DELETE FROM packages WHERE id = ?").run(id);
+      });
+      transaction();
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Error deleting package:", error);
+      res.status(500).json({ error: error.message || "Internal server error" });
+    }
   });
 
   // Session Logs
@@ -252,8 +306,31 @@ async function startServer() {
 
   app.delete("/api/logs/:id", (req, res) => {
     const { id } = req.params;
-    db.prepare("DELETE FROM session_logs WHERE id = ?").run(id);
-    res.json({ success: true });
+    try {
+      const transaction = db.transaction(() => {
+        const log = db.prepare("SELECT package_id FROM session_logs WHERE id = ?").get() as any;
+        if (log) {
+          db.prepare("DELETE FROM session_logs WHERE id = ?").run(id);
+          
+          // Update linked visit
+          const pkg = db.prepare("SELECT visit_id, total_sessions FROM packages WHERE id = ?").get() as any;
+          if (pkg && pkg.visit_id) {
+            const usedCount = db.prepare("SELECT COUNT(*) as count FROM session_logs WHERE package_id = ?").get() as any;
+            // Note: We don't necessarily want to set is_paid to 0 if it was 1, 
+            // because is_paid usually means money paid in this app.
+            // But for packages, it seems to be tied to sessions in some logic.
+            // Let's just update used_sessions.
+            db.prepare("UPDATE visits SET used_sessions = ? WHERE id = ?")
+              .run(usedCount.count, pkg.visit_id);
+          }
+        }
+      });
+      transaction();
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Error deleting log:", error);
+      res.status(500).json({ error: error.message || "Internal server error" });
+    }
   });
 
   // Patients
@@ -269,33 +346,47 @@ async function startServer() {
 
   app.post("/api/patients", (req, res) => {
     const { name, company_id } = req.body;
-    const info = db.prepare("INSERT INTO patients (name, company_id) VALUES (?, ?)").run(name, company_id);
-    res.json({ id: info.lastInsertRowid });
+    try {
+      const info = db.prepare("INSERT INTO patients (name, company_id) VALUES (?, ?)").run(name, company_id);
+      res.json({ id: info.lastInsertRowid });
+    } catch (error: any) {
+      console.error("Error creating patient:", error);
+      res.status(500).json({ error: error.message || "Internal server error" });
+    }
   });
 
   app.put("/api/patients/:id", (req, res) => {
     const { id } = req.params;
     const { name, company_id, status } = req.body;
-    db.prepare("UPDATE patients SET name = ?, company_id = ?, status = ? WHERE id = ?").run(name, company_id, status, id);
-    res.json({ success: true });
+    try {
+      db.prepare("UPDATE patients SET name = ?, company_id = ?, status = ? WHERE id = ?").run(name, company_id, status, id);
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Error updating patient:", error);
+      res.status(500).json({ error: error.message || "Internal server error" });
+    }
   });
 
   app.delete("/api/patients/:id", (req, res) => {
     const { id } = req.params;
-    // Check if patient has visits
-    const visits = db.prepare("SELECT COUNT(*) as count FROM visits WHERE patient_id = ?").get() as any;
-    if (visits.count > 0) {
-      return res.status(400).json({ error: "Cannot delete patient with existing visits" });
+    try {
+      // Check if patient has visits
+      const visits = db.prepare("SELECT COUNT(*) as count FROM visits WHERE patient_id = ?").get() as any;
+      if (visits.count > 0) {
+        return res.status(400).json({ error: "Cannot delete patient with existing visits" });
+      }
+      db.prepare("DELETE FROM patients WHERE id = ?").run(id);
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Error deleting patient:", error);
+      res.status(500).json({ error: error.message || "Internal server error" });
     }
-    db.prepare("DELETE FROM patients WHERE id = ?").run(id);
-    res.json({ success: true });
   });
 
   // Visits
   app.get("/api/visits", (req, res) => {
-    const { month, year, start_date, end_date, company_id } = req.query;
     let query = `
-      SELECT v.*, p.name as patient_name, c.name as company_name, s.name as service_name
+      SELECT v.*, p.name as patient_name, p.company_id, c.name as company_name, s.name as service_name
       FROM visits v
       JOIN patients p ON v.patient_id = p.id
       LEFT JOIN companies c ON p.company_id = c.id
@@ -303,6 +394,7 @@ async function startServer() {
       WHERE 1=1
     `;
     const params = [];
+    const { month, year, start_date, end_date, company_id, patient_id } = req.query;
     if (month && year) {
       query += " AND strftime('%m', v.visit_date) = ? AND strftime('%Y', v.visit_date) = ?";
       params.push(month.toString().padStart(2, '0'), year.toString());
@@ -315,6 +407,10 @@ async function startServer() {
       query += " AND p.company_id = ?";
       params.push(company_id);
     }
+    if (patient_id) {
+      query += " AND v.patient_id = ?";
+      params.push(patient_id);
+    }
     query += " ORDER BY v.visit_date DESC";
     const visits = db.prepare(query).all(...params);
     res.json(visits);
@@ -324,31 +420,60 @@ async function startServer() {
     const { patient_id, service_id, visit_date, amount, notes, paid_amount, total_sessions } = req.body;
     const is_paid = (paid_amount || 0) >= (amount || 0) ? 1 : 0;
     
-    const transaction = db.transaction(() => {
-      const info = db.prepare("INSERT INTO visits (patient_id, service_id, visit_date, amount, paid_amount, is_paid, notes, total_sessions) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-        .run(patient_id, service_id, visit_date, amount, paid_amount || 0, is_paid, notes, total_sessions || 1);
-      
-      const visitId = info.lastInsertRowid;
+    try {
+      const transaction = db.transaction(() => {
+        const info = db.prepare("INSERT INTO visits (patient_id, service_id, visit_date, amount, paid_amount, is_paid, notes, total_sessions) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+          .run(patient_id, service_id, visit_date, amount, paid_amount || 0, is_paid, notes, total_sessions || 1);
+        
+        const visitId = info.lastInsertRowid;
 
-      if (total_sessions && total_sessions > 1) {
-        db.prepare("INSERT INTO packages (patient_id, service_id, total_sessions, visit_id) VALUES (?, ?, ?, ?)")
-          .run(patient_id, service_id, total_sessions, visitId);
-      }
+        if (total_sessions && total_sessions > 1) {
+          db.prepare("INSERT INTO packages (patient_id, service_id, total_sessions, visit_id) VALUES (?, ?, ?, ?)")
+            .run(patient_id, service_id, total_sessions, visitId);
+        }
 
-      return visitId;
-    });
+        return visitId;
+      });
 
-    const visitId = transaction();
-    res.json({ id: visitId });
+      const visitId = transaction();
+      res.json({ id: visitId });
+    } catch (error: any) {
+      console.error("Error creating visit:", error);
+      res.status(500).json({ error: error.message || "Internal server error" });
+    }
   });
 
   app.put("/api/visits/:id", (req, res) => {
     const { id } = req.params;
-    const { patient_id, service_id, visit_date, amount, paid_amount, notes, is_paid } = req.body;
+    const { patient_id, service_id, visit_date, amount, paid_amount, notes, is_paid, total_sessions, is_postponed } = req.body;
     const final_is_paid = is_paid !== undefined ? (is_paid ? 1 : 0) : ((paid_amount || 0) >= (amount || 0) ? 1 : 0);
-    db.prepare("UPDATE visits SET patient_id = ?, service_id = ?, visit_date = ?, amount = ?, paid_amount = ?, notes = ?, is_paid = ? WHERE id = ?")
-      .run(patient_id, service_id, visit_date, amount, paid_amount || 0, notes, final_is_paid, id);
-    res.json({ success: true });
+    
+    try {
+      const transaction = db.transaction(() => {
+        db.prepare("UPDATE visits SET patient_id = ?, service_id = ?, visit_date = ?, amount = ?, paid_amount = ?, notes = ?, is_paid = ?, total_sessions = ?, is_postponed = ? WHERE id = ?")
+          .run(patient_id, service_id, visit_date, amount, paid_amount || 0, notes, final_is_paid, total_sessions || 1, is_postponed || 0, id);
+        
+        if (total_sessions && total_sessions > 1) {
+          // Check if package exists
+          const existingPkg = db.prepare("SELECT id FROM packages WHERE visit_id = ?").get() as any;
+          if (existingPkg) {
+            db.prepare("UPDATE packages SET total_sessions = ?, patient_id = ?, service_id = ? WHERE id = ?")
+              .run(total_sessions, patient_id, service_id, existingPkg.id);
+          } else {
+            db.prepare("INSERT INTO packages (patient_id, service_id, total_sessions, visit_id) VALUES (?, ?, ?, ?)")
+              .run(patient_id, service_id, total_sessions, id);
+          }
+        } else {
+          db.prepare("UPDATE packages SET total_sessions = 1 WHERE visit_id = ?").run(id);
+        }
+      });
+
+      transaction();
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Error updating visit:", error);
+      res.status(500).json({ error: error.message || "Internal server error" });
+    }
   });
 
   app.patch("/api/visits/:id/pay", (req, res) => {
@@ -418,8 +543,13 @@ async function startServer() {
 
   app.delete("/api/services/:id", (req, res) => {
     const { id } = req.params;
-    db.prepare("DELETE FROM services WHERE id = ?").run(id);
-    res.json({ success: true });
+    try {
+      db.prepare("DELETE FROM services WHERE id = ?").run(id);
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Error deleting service:", error);
+      res.status(500).json({ error: error.message || "Internal server error" });
+    }
   });
 
   // Company Statistics by Date
